@@ -1,0 +1,48 @@
+# GitLab CI/CD – Multi-Cloud Security Pipeline- Example skeleton 
+
+stages:
+  - validate
+  - build
+  - scan
+  - approval
+  - deploy
+
+# Stage 1: Check secrets, Terraform and security policies
+security-checks:
+  stage: validate
+  script:
+    - echo "Gitleaks - scan for secrets"
+    - echo "Checkov - scan AWS, Azure and GCP Terraform"
+    - echo "Conftest - validate common security policies"
+    - echo "Fail on Critical violations; warn on approved lower risks"
+
+# Stage 2: Build application
+build:
+  stage: build
+  script:
+    - echo "Build application and dependencies"
+
+# Stage 3: Scan dependencies and generate SBOM
+dependency-scan:
+  stage: scan
+  script:
+    - echo "Trivy - scan dependencies"
+    - echo "Generate and retain SBOM"
+    - echo "Record findings in remediation backlog"
+
+# Stage 4: Production security approval
+production-approval:
+  stage: approval
+  script:
+    - echo "Review security findings and approved exceptions"
+  when: manual
+
+# Stage 5: Deploy using cloud-specific identity
+deploy-production:
+  stage: deploy
+  script:
+    - echo "Authenticate using short-lived OIDC credentials"
+    - echo "Terraform plan and apply to AWS, Azure or GCP"
+  environment:
+    name: production
+  when: manual
