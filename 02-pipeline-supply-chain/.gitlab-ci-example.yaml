@@ -1,0 +1,120 @@
+
+# Track 1 - DevSecOps GitLab Pipeline
+# Scan -> Build -> Check -> Sign -> Deploy
+
+stages:
+  - validate
+  - build
+  - security
+  - release
+  - deploy
+
+variables:
+  IMAGE: "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+
+# 1. Check code and configuration before building
+
+secret-scan:
+  stage: validate
+  image:
+    name: zricethezav/gitleaks:latest
+    entrypoint: [""]
+  script:
+    - gitleaks detect --source .
+
+config-scan:
+  stage: validate
+  image:
+    name: bridgecrew/checkov:latest
+    entrypoint: [""]
+  script:
+    - checkov -d .
+
+kubernetes-policy:
+  stage: validate
+  image:
+    name: openpolicyagent/conftest:latest
+    entrypoint: [""]
+  script:
+    - conftest test kubernetes/ --policy policy/
+
+# 2. Build and push the container image
+
+build-image:
+  stage: build
+  image: docker:stable
+  services:
+    - docker:dind
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - docker build -t "$IMAGE" .
+    - docker push "$IMAGE"
+
+# 3. Scan the image and generate SBOM
+
+container-scan:
+  stage: security
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  script:
+    - trivy image --severity HIGH,CRITICAL --exit-code 1 "$IMAGE"
+
+generate-sbom:
+  stage: security
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  script:
+    - trivy image --format cyclonedx --output sbom.json "$IMAGE"
+  artifacts:
+    paths:
+      - sbom.json
+
+# 4. Sign the approved image
+
+sign-image:
+  stage: release
+  image:
+    name: gcr.io/projectsigstore/cosign:latest
+    entrypoint: [""]
+  script:
+    - cosign sign --yes "$IMAGE"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+# 5. Deploy to EKS after approval
+
+deploy-production:
+  stage: deploy
+  image:
+    name: "$CI_REGISTRY_IMAGE/devsecops-deployer:1.0"
+    entrypoint: [""]
+
+  # Get temporary AWS access using GitLab OIDC
+  id_tokens:
+    GITLAB_OIDC_TOKEN:
+      aud: sts.amazonaws.com
+
+  script:
+    - |
+      TEMP_CREDS=$(aws sts assume-role-with-web-identity \
+        --role-arn "$AWS_DEPLOY_ROLE_ARN" \
+        --role-session-name "gitlab-${CI_PIPELINE_ID}" \
+        --web-identity-token "$GITLAB_OIDC_TOKEN" \
+        --duration-seconds 900 \
+        --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+        --output text)
+
+      read AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN <<< "$TEMP_CREDS"
+      export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+
+    - aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME"
+    - kubectl apply -f kubernetes/
+
+  environment:
+    name: production
+
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: manual
